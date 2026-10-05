@@ -13,7 +13,13 @@ pip install -r requirements.txt
 python server.py
 ```
 
-Listens on `127.0.0.1:8001`. Interactive API docs: <http://127.0.0.1:8001/docs>.
+Defaults to `HOST=127.0.0.1` and `PORT=8001`. Override with:
+
+```sh
+HOST=127.0.0.1 PORT=8080 python server.py
+```
+
+Interactive API docs (default address): <http://127.0.0.1:8001/docs>.
 Health check: `curl http://127.0.0.1:8001/health`.
 Set `LAYA_DEVICE=cpu` or `LAYA_DEVICE=cuda` to request a device; otherwise Laya chooses.
 

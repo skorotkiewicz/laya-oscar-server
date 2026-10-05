@@ -86,3 +86,21 @@ python -m unittest test_server.py
 
 The check stubs Laya and exercises the real HTTP routes, validation, and error handling.
 It does not verify real-model inference.
+
+## Evaluate real models
+
+With the server running, compare both models against `cases.jsonl`:
+
+```sh
+python check_cases.py --url http://192.168.0.124:8001
+# If authentication is enabled:
+API_KEY="demo" python check_cases.py --url http://192.168.0.124:8001
+```
+
+Use `--models laya` or `--models oscar-1` to check one model, and `--cases PATH`
+for another JSONL file. The default server URL is `http://127.0.0.1:8001`.
+Each row reports the expected answer, raw prediction, and probability assigned to the
+expected answer. A choice passes on an exact label match; noul uses a 0.5 threshold;
+score passes when it is less than 0.5 away from the expected zero-based rubric index.
+A passing answer can still have weak confidence, so inspect the probabilities too.
+Exit codes: 0 for all cases passing, 1 for mismatches, 2 for HTTP/connection errors.

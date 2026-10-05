@@ -8,10 +8,27 @@ from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
+from check_cases import assess
 from server import CHECKPOINTS, app
 
 
 class ServerTest(unittest.TestCase):
+    def test_case_assessment(self):
+        for expected, probability, passes in ((True, 0.5866, True), (False, 0.1, True),
+                                               (True, 0.1, False), (False, 0.8, False)):
+            ok, actual, p_expected = assess({"type": "noul", "expected": expected}, {"noul": probability})
+            self.assertEqual(ok, passes)
+            self.assertEqual(actual, probability)
+            self.assertAlmostEqual(p_expected, probability if expected else 1 - probability)
+        for choice in ("r", "b"):
+            self.assertEqual(assess({"type": "choice", "expected": "r"},
+                                   {"choice": choice, "probabilities": {"r": 0.9, "b": 0.1}}),
+                             (choice == "r", choice, 0.9))
+        for score, passes in ((3.7, True), (0.9, False), (3.5, False)):
+            self.assertEqual(assess({"type": "score", "expected": 4},
+                                   {"score": score, "probabilities": {"4": 0.7}}),
+                             (passes, score, 0.7))
+
     def test_http_api(self):
         questions = {
             "intent": {"type": "choice", "instructions": "What does the customer want?",

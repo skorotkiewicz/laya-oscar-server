@@ -1,7 +1,6 @@
 # Laya Oscar HTTP API
 
-Serves `mgoeckel/oscar-1-400m` from `example.py` using the
-`POST /v1/decisions` request format in `example.md`.
+Serves `mgoeckel/oscar-1-400m` via `POST /v1/decisions`.
 The model loads once at startup. First startup downloads the checkpoint
 from Hugging Face and requires internet access and enough memory for inference.
 
@@ -46,7 +45,6 @@ curl http://127.0.0.1:8001/v1/decisions \
 ```
 
 `model` is optional, defaults to `oscar-1`, and also accepts the full checkpoint ID.
-Replace `needle-research` in the examples with `oscar-1`.
 `state` accepts a string or a JSON object. Choice criteria accept a label-to-description
 object or a list; score criteria require a list. Answers and usage pass through from
 Laya unchanged, with `model: "oscar-1"` added. No fabricated billing or provider metadata.

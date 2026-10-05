@@ -1,5 +1,6 @@
 """HTTP API for the Oscar checkpoint used in example.py."""
 
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -10,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, StrictStr, model_validator
 
 CHECKPOINT = "mgoeckel/oscar-1-400m"
-Text = Annotated[StrictStr, Field(min_length=1)]
+Text = Annotated[StrictStr, Field(min_length=1, max_length=4096)]
 Criteria = (
     Annotated[dict[Text, Text], Field(min_length=2, max_length=255)]
     | Annotated[list[Text], Field(min_length=2, max_length=255)]
@@ -39,8 +40,14 @@ class Question(BaseModel):
 
 class DecisionRequest(BaseModel):
     model: Literal["oscar-1", "mgoeckel/oscar-1-400m"] = "oscar-1"
-    state: Text | dict[str, object]
+    state: Annotated[StrictStr, Field(min_length=1, max_length=50000)] | dict[str, object]
     questions: Annotated[dict[Text, Question], Field(min_length=1, max_length=64)]
+
+    @model_validator(mode="after")
+    def check_state_size(self):
+        if isinstance(self.state, dict) and len(json.dumps(self.state, ensure_ascii=False)) > 50000:
+            raise ValueError("state must not exceed 50000 characters")
+        return self
 
 
 @asynccontextmanager

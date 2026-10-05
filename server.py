@@ -1,4 +1,4 @@
-"""HTTP API for the Oscar checkpoint used in example.py."""
+"""HTTP API for Oscar and Laya checkpoints."""
 
 import json
 import logging
@@ -10,7 +10,10 @@ from typing import Annotated, Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, StrictStr, model_validator
 
-CHECKPOINT = "mgoeckel/oscar-1-400m"
+CHECKPOINTS = {
+    "oscar-1": "mgoeckel/oscar-1-400m",
+    "laya": "convaiinnovations/laya",
+}
 Text = Annotated[StrictStr, Field(min_length=1, max_length=4096)]
 Criteria = (
     Annotated[dict[Text, Text], Field(min_length=2, max_length=255)]
@@ -39,7 +42,7 @@ class Question(BaseModel):
 
 
 class DecisionRequest(BaseModel):
-    model: Literal["oscar-1", "mgoeckel/oscar-1-400m"] = "oscar-1"
+    model: Literal["oscar-1", "mgoeckel/oscar-1-400m", "laya", "convaiinnovations/laya"] = "oscar-1"
     state: Annotated[StrictStr, Field(min_length=1, max_length=50000)] | dict[str, object]
     questions: Annotated[dict[Text, Question], Field(min_length=1, max_length=64)]
 
@@ -54,34 +57,38 @@ class DecisionRequest(BaseModel):
 async def lifespan(app: FastAPI):
     import laya
 
-    app.state.agent = laya.load(CHECKPOINT, device=os.getenv("LAYA_DEVICE") or None)
+    app.state.agents = {
+        name: laya.load(checkpoint, device=os.getenv("LAYA_DEVICE") or None)
+        for name, checkpoint in CHECKPOINTS.items()
+    }
     # ponytail: one inference at a time; batch requests if throughput matters.
     app.state.inference_lock = Lock()
     try:
         yield
     finally:
-        del app.state.agent
+        del app.state.agents
 
 
-app = FastAPI(title="Laya Oscar API", lifespan=lifespan)
+app = FastAPI(title="Laya and Oscar API", lifespan=lifespan)
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": "oscar-1"}
+    return {"status": "ok", "models": list(CHECKPOINTS)}
 
 
 @app.post("/v1/decisions")
 def decisions(body: DecisionRequest):
     questions = {key: question.model_dump(exclude_none=True) for key, question in body.questions.items()}
+    model = "laya" if body.model in ("laya", CHECKPOINTS["laya"]) else "oscar-1"
     try:
         with app.state.inference_lock:
-            result = app.state.agent.predict(body.state, questions)
-        return {**result, "model": "oscar-1"}
+            result = app.state.agents[model].predict(body.state, questions)
+        return {**result, "model": model}
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
-        logging.exception("Oscar inference failed")
+        logging.exception("%s inference failed", model)
         raise HTTPException(status_code=500, detail="inference failed") from error
 
 

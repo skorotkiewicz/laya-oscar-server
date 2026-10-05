@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
-from server import CHECKPOINT, app
+from server import CHECKPOINTS, app
 
 
 class ServerTest(unittest.TestCase):
@@ -29,19 +29,38 @@ class ServerTest(unittest.TestCase):
         }
         agent = Mock()
         agent.predict.return_value = result
-        load = Mock(return_value=agent)
+        laya_agent = Mock()
+        laya_agent.predict.return_value = {**result, "usage": {"input_tokens": 100, "output_tokens": 0}}
+        agents = {"oscar-1": agent, "laya": laya_agent}
+        load = Mock(side_effect=lambda checkpoint, **kwargs: agents[next(
+            name for name, source in CHECKPOINTS.items() if source == checkpoint
+        )])
         with patch.dict(sys.modules, {"laya": SimpleNamespace(load=load)}):
             with TestClient(app) as client:
-                load.assert_called_once()
-                self.assertEqual(load.call_args.args, (CHECKPOINT,))
-                self.assertEqual(client.get("/health").json(), {"status": "ok", "model": "oscar-1"})
+                self.assertEqual(load.call_count, 2)
+                self.assertEqual([call.args for call in load.call_args_list], [(source,) for source in CHECKPOINTS.values()])
+                self.assertEqual(client.get("/health").json(), {"status": "ok", "models": ["oscar-1", "laya"]})
                 for state in ("Zoë needs a refund.", {"text": "Zoë needs a refund."}):
                     response = client.post("/v1/decisions", json={"state": state, "questions": questions})
                     self.assertEqual(response.status_code, 200)
                     self.assertEqual(response.json(), {**result, "model": "oscar-1"})
                     agent.predict.assert_called_with(state, questions)
 
-                calls = agent.predict.call_count
+                for model, name in (
+                    ("oscar-1", "oscar-1"), ("mgoeckel/oscar-1-400m", "oscar-1"),
+                    ("laya", "laya"), ("convaiinnovations/laya", "laya"),
+                    ("oscar-1", "oscar-1"),
+                ):
+                    selected, other = agents[name], agents["laya" if name == "oscar-1" else "oscar-1"]
+                    other_calls = other.predict.call_count
+                    response = client.post("/v1/decisions", json={"model": model, "state": "hello", "questions": questions})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json(), {**selected.predict.return_value, "model": name})
+                    selected.predict.assert_called_with("hello", questions)
+                    self.assertEqual(other.predict.call_count, other_calls)
+                self.assertEqual(load.call_count, 2)
+
+                calls = [agent.predict.call_count for agent in agents.values()]
                 for invalid in (
                     {"model": "needle-research", "state": "hello", "questions": questions},
                     {"state": "hello", "questions": {}},
@@ -53,7 +72,7 @@ class ServerTest(unittest.TestCase):
                 ):
                     self.assertEqual(client.post("/v1/decisions", json=invalid).status_code, 422)
                 self.assertEqual(client.post("/v1/decisions", content="not JSON").status_code, 422)
-                self.assertEqual(agent.predict.call_count, calls)
+                self.assertEqual([agent.predict.call_count for agent in agents.values()], calls)
 
                 agent.predict.side_effect = ValueError("invalid question")
                 self.assertEqual(client.post("/v1/decisions", json={"state": "hello", "questions": questions}).status_code, 422)
@@ -62,7 +81,7 @@ class ServerTest(unittest.TestCase):
                     response = client.post("/v1/decisions", json={"state": "hello", "questions": questions})
                 self.assertEqual(response.status_code, 500)
                 self.assertEqual(response.json(), {"detail": "inference failed"})
-        self.assertFalse(hasattr(app.state, "agent"))
+        self.assertFalse(hasattr(app.state, "agents"))
 
 
 if __name__ == "__main__":

@@ -48,7 +48,8 @@
       <dl>
         <div><dt>Pipes passed</dt><dd id="score">0</dd></div>
         <div><dt>Last decision</dt><dd id="action">None</dd></div>
-        <div><dt>Option probability</dt><dd id="probability">n/a</dd></div>
+        <div><dt>P(below target)</dt><dd id="below">n/a</dd></div>
+        <div><dt>P(falling)</dt><dd id="falling">n/a</dd></div>
         <div><dt>API round trip</dt><dd id="latency">n/a</dd></div>
       </dl>
       <p id="status" role="status" aria-live="polite">Ready. Your API is the pilot.</p>
@@ -75,7 +76,7 @@ function reset() {
   crashed = false;
   $("score").textContent = "0";
   $("action").textContent = "None";
-  $("probability").textContent = $("latency").textContent = "n/a";
+  $("below").textContent = $("falling").textContent = $("latency").textContent = "n/a";
   draw();
 }
 
@@ -140,15 +141,24 @@ function draw() {
 
 function observation() {
   const pipe = pipes.find(pipe => pipe.x + 62 >= birdX - radius);
-  const position = bird.y < pipe.top + radius ? "above" : bird.y > pipe.bottom - radius ? "below" : "inside";
+  const target = (pipe.top + pipe.bottom) / 2;
   return {
     game: "Flappy Bird: avoid pipes, ceiling and floor. Y increases downward.",
     bird: { y: Math.round(bird.y), velocity_y: Math.round(bird.velocity), radius },
     next_pipe: { distance_x: Math.round(pipe.x - birdX), gap_top: Math.round(pipe.top),
-      gap_bottom: Math.round(pipe.bottom), gap_center: Math.round((pipe.top + pipe.bottom) / 2) },
-    position: `The bird is ${position} the opening and is ${bird.velocity < 0 ? "rising" : "falling"}.`,
+      gap_bottom: Math.round(pipe.bottom), gap_center: Math.round(target) },
+    height: bird.y > target ? "Too low, below the target height (the center of the opening)." :
+      bird.y < target ? "Too high, above the target height (the center of the opening)." : "At the target height.",
+    motion: bird.velocity < 0 ? "Rising upward after a flap." : "Falling downward.",
     physics: { gravity, flap_velocity: flapVelocity, pipe_speed: pipeSpeed, floor_y: floor, turn_seconds: .15 }
   };
+}
+
+function chooseAction(below, falling) {
+  if (![below, falling].every(p => Number.isFinite(p) && p >= 0 && p <= 1))
+    throw new Error("The API returned invalid height/motion probabilities.");
+  // ponytail: below-and-falling rule ignores lookahead; predict trajectories for tighter gaps.
+  return below >= .5 && falling >= .5 ? "flap" : "wait";
 }
 
 async function api(path, options, flight) {
@@ -178,18 +188,17 @@ async function startGame() {
       $("status").textContent = `${$("model").value} is thinking…`;
       const started = performance.now();
       const result = await api("/v1/decisions", { method: "POST", body: JSON.stringify({
-        model: $("model").value, state: observation(), questions: { move: {
-          type: "choice", instructions: "Choose the bird's next action to stay alive. Aim for the next pipe opening. " +
-            "Flapping moves up; waiting lets gravity pull down. Avoid flapping into the ceiling or upper pipe.",
-          criteria: { flap: "Flap now to gain height", wait: "Do not flap; continue coasting under gravity" }
-        } }
+        model: $("model").value, state: observation(), questions: {
+          below: { type: "noul", instructions: "Is the bird below the target height?" },
+          falling: { type: "noul", instructions: "Is the bird falling downward?" }
+        }
       }) }, flight);
       if (flight.signal.aborted) return;
-      const answer = result.answers?.move, action = answer?.choice, probability = answer?.probabilities?.[action];
-      if (!["flap", "wait"].includes(action) || !Number.isFinite(probability) || probability < 0 || probability > 1)
-        throw new Error("The API returned an invalid flap/wait decision.");
+      const below = result.answers?.below?.noul, falling = result.answers?.falling?.noul;
+      const action = chooseAction(below, falling);
       $("action").textContent = action.toUpperCase();
-      $("probability").textContent = `${(probability * 100).toFixed(1)}%`;
+      $("below").textContent = `${(below * 100).toFixed(1)}%`;
+      $("falling").textContent = `${(falling * 100).toFixed(1)}%`;
       $("latency").textContent = `${Math.round(performance.now() - started)} ms`;
       $("status").textContent = action === "flap" ? "A little lift." : "Coasting.";
       if (action === "flap") bird.velocity = flapVelocity;

@@ -97,7 +97,10 @@ proxy to protect the token in transit. Run one worker to avoid duplicate model l
 Open <http://127.0.0.1:8001/floppybird.html> on the running server (use its actual
 host and port if different). Select a model, enter the API key if required, and
 click **Start flight**. The page detects enabled models from `/health` and sends
-flap/wait questions to `/v1/decisions` on the same origin, so no CORS setup is needed.
+two `noul` questions to `/v1/decisions`: is the bird below the target height, and is
+it falling? The target is the next pipe opening's center. The explicit rule is
+**flap only when both probabilities are at least 0.5; otherwise wait**. Height and
+motion are also described in words. Requests use the same origin, so no CORS setup is needed.
 
 The simulation pauses during each API request, then advances 0.15 seconds.
 Only one request is in flight; **Stop flight** cancels it. API keys stay in the page's
@@ -116,7 +119,12 @@ HTTP payloads, cancellation, and error handling without a browser or model:
 
 ```sh
 node test_floppybird.js
+# Simulate a flight with the real API and reproducible pipe positions:
+node test_floppybird.js --live http://192.168.0.124:8001
 ```
+
+The live check stops on a crash or after 200 turns. Set `API_KEY` for an authenticated
+server. This checks a simple rule driven by model judgments, not a learned flight policy.
 
 ## Evaluate real models
 

@@ -59,10 +59,14 @@ class DecisionRequest(BaseModel):
 async def lifespan(app: FastAPI):
     import laya
 
+    selected = os.getenv("MODEL") or None
+    if selected is not None and selected not in CHECKPOINTS:
+        raise ValueError("MODEL must be 'laya' or 'oscar-1'")
     app.state.api_key = os.getenv("API_KEY")
     app.state.agents = {
         name: laya.load(checkpoint, device=os.getenv("LAYA_DEVICE") or None)
         for name, checkpoint in CHECKPOINTS.items()
+        if selected is None or name == selected
     }
     # ponytail: one inference at a time; batch requests if throughput matters.
     app.state.inference_lock = Lock()
@@ -90,13 +94,15 @@ app = FastAPI(title="Laya and Oscar API", lifespan=lifespan, dependencies=[Depen
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "models": list(CHECKPOINTS)}
+    return {"status": "ok", "models": list(app.state.agents)}
 
 
 @app.post("/v1/decisions")
 def decisions(body: DecisionRequest):
     questions = {key: question.model_dump(exclude_none=True) for key, question in body.questions.items()}
     model = "laya" if body.model in ("laya", CHECKPOINTS["laya"]) else "oscar-1"
+    if model not in app.state.agents:
+        raise HTTPException(status_code=422, detail=f"model '{model}' is not enabled on this server")
     try:
         with app.state.inference_lock:
             result = app.state.agents[model].predict(body.state, questions)

@@ -53,7 +53,7 @@ class ServerTest(unittest.TestCase):
         load = Mock(side_effect=lambda checkpoint, **kwargs: agents[next(
             name for name, source in CHECKPOINTS.items() if source == checkpoint
         )])
-        with patch.dict(os.environ, {"API_KEY": ""}), patch.dict(sys.modules, {"laya": SimpleNamespace(load=load)}):
+        with patch.dict(os.environ, {"API_KEY": "", "MODEL": ""}), patch.dict(sys.modules, {"laya": SimpleNamespace(load=load)}):
             with TestClient(app) as client:
                 self.assertEqual(load.call_count, 2)
                 self.assertEqual([call.args for call in load.call_args_list], [(source,) for source in CHECKPOINTS.values()])
@@ -100,6 +100,39 @@ class ServerTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 500)
                 self.assertEqual(response.json(), {"detail": "inference failed"})
         self.assertFalse(hasattr(app.state, "agents"))
+
+    def test_model_selection(self):
+        body = {"state": "hello", "questions": {"x": {"type": "noul", "instructions": "Is this a greeting?"}}}
+        for selection in (None, "", "laya", "oscar-1", "unknown"):
+            agent = Mock()
+            agent.predict.return_value = {"answers": {"x": {"type": "noul", "noul": 0.9}}}
+            load = Mock(return_value=agent)
+            with patch.dict(os.environ, {}, clear=True), patch.dict(sys.modules, {"laya": SimpleNamespace(load=load)}):
+                if selection is not None:
+                    os.environ["MODEL"] = selection
+                if selection == "unknown":
+                    with self.assertRaisesRegex(ValueError, "MODEL must be"):
+                        with TestClient(app):
+                            pass
+                    load.assert_not_called()
+                    continue
+                enabled = [selection] if selection else list(CHECKPOINTS)
+                with TestClient(app) as client:
+                    self.assertEqual([call.args for call in load.call_args_list], [(CHECKPOINTS[name],) for name in enabled])
+                    self.assertEqual(client.get("/health").json(), {"status": "ok", "models": enabled})
+                    for name, source in CHECKPOINTS.items():
+                        for model in (name, source):
+                            calls = agent.predict.call_count
+                            response = client.post("/v1/decisions", json={**body, "model": model})
+                            self.assertEqual(response.status_code, 200 if name in enabled else 422)
+                            if name in enabled:
+                                self.assertEqual(response.json()["model"], name)
+                            else:
+                                self.assertEqual(response.json(), {"detail": f"model '{name}' is not enabled on this server"})
+                                self.assertEqual(agent.predict.call_count, calls)
+                    # Omitting the request model still defaults to Oscar.
+                    self.assertEqual(client.post("/v1/decisions", json=body).status_code, 422 if selection == "laya" else 200)
+                    self.assertEqual(load.call_count, len(enabled))
 
     def test_optional_api_key(self):
         body = {"state": "hello", "questions": {"x": {"type": "noul", "instructions": "Is this a greeting?"}}}

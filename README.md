@@ -1,8 +1,9 @@
 # Laya and Oscar HTTP API
 
 Serves `mgoeckel/oscar-1-400m` and `convaiinnovations/laya` via `POST /v1/decisions`.
-Both models load once at startup. First startup downloads the checkpoints
-from Hugging Face and requires internet access and enough memory for both models.
+By default, both models load once at startup. Set `MODEL` to load only one.
+First startup downloads the enabled checkpoints from Hugging Face and requires
+internet access and enough memory for those models.
 
 ## Run
 
@@ -22,6 +23,20 @@ HOST=127.0.0.1 PORT=8080 python server.py
 Interactive API docs (default address): <http://127.0.0.1:8001/docs>.
 Health check: `curl http://127.0.0.1:8001/health`.
 Set `LAYA_DEVICE=cpu` or `LAYA_DEVICE=cuda` to request a device; otherwise Laya chooses.
+
+## Optional model selection
+
+```sh
+MODEL="laya" python server.py
+# Or load only Oscar:
+MODEL="oscar-1" python server.py
+```
+
+Unset or empty `MODEL` keeps the current behavior: both models load.
+Requests for a disabled model return HTTP 422; `/health` lists only loaded models.
+An unsupported `MODEL` value fails at startup before loading any checkpoint.
+The request `model` still defaults to `oscar-1`, so include `"model": "laya"`
+when running in Laya-only mode. Configuration is read at startup.
 
 ## Optional API key
 

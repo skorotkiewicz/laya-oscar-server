@@ -143,6 +143,12 @@ class ServerTest(unittest.TestCase):
                 if key is not None:
                     os.environ["API_KEY"] = key
                 with TestClient(app) as client:
+                    page = client.get("/floppybird.html")
+                    self.assertEqual(page.status_code, 200)
+                    self.assertTrue(page.headers["content-type"].startswith("text/html"))
+                    self.assertIn('id="game"', page.text)
+                    self.assertIn('"/v1/decisions"', page.text)
+                    self.assertEqual(client.get("/server.py").status_code, 404)
                     # The key is captured at startup, not re-read for each request.
                     os.environ["API_KEY"] = "changed"
                     for headers in ({}, {"Authorization": "Bearer wrong"}, {"Authorization": "Basic demo"},

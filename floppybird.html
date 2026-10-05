@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Floppybird · decision-model playground</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #26392e; background: #f4f1e8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 36px 20px; }
+    main { max-width: 800px; margin: auto; }
+    .eyebrow { color: #577463; font-size: .75rem; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; }
+    h1 { margin: 8px 0; font-size: clamp(2.2rem, 6vw, 3.5rem); letter-spacing: -.05em; }
+    .intro { margin: 0 0 24px; color: #58655c; }
+    .layout { display: grid; grid-template-columns: minmax(0, 480px) minmax(200px, 1fr); gap: 24px; align-items: start; }
+    canvas { display: block; width: 100%; height: auto; border-radius: 16px; border: 2px solid #c3d4c7; }
+    aside { background: #fffdf7; border: 1px solid #deded0; padding: 22px; border-radius: 16px; }
+    label { display: block; margin-bottom: 6px; font-size: .85rem; font-weight: 650; }
+    input, select, button { width: 100%; font: inherit; border-radius: 8px; padding: 10px 12px; }
+    input, select { background: white; color: #26392e; border: 1px solid #a7b8ac; margin-bottom: 16px; }
+    button { background: #326648; color: white; border: 0; cursor: pointer; font-weight: 650; }
+    button:hover { background: #254f37; }
+    :focus-visible { outline: 3px solid #c56c34; outline-offset: 3px; }
+    :disabled { opacity: .65; }
+    dl { margin: 22px 0; }
+    dl div { display: flex; justify-content: space-between; gap: 12px; margin: 12px 0; }
+    dt { color: #58655c; }
+    dd { margin: 0; font-weight: 650; text-align: right; font-variant-numeric: tabular-nums; }
+    #status { min-height: 3em; font-size: .9rem; overflow-wrap: anywhere; }
+    small { display: block; color: #657067; line-height: 1.5; }
+    footer { margin-top: 18px; font-size: .85rem; color: #58655c; }
+    @media (max-width: 650px) { .layout { grid-template-columns: 1fr; } body { padding: 20px 14px; } }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">A tiny decision-model playground</div>
+  <h1>Floppybird.</h1>
+  <p class="intro">Two choices. One bird. Can your model keep it airborne?</p>
+  <div class="layout">
+    <canvas id="game" width="480" height="560" role="img" aria-label="A golden bird flying through green pipes. Score and decisions appear alongside the game."></canvas>
+    <aside aria-label="Game controls">
+      <label for="model">Pilot model</label>
+      <select id="model"><option value="laya">Laya</option><option value="oscar-1">Oscar-1</option></select>
+      <label for="key">API key, if required</label>
+      <input id="key" type="password" autocomplete="off" placeholder="Optional bearer token">
+      <button id="start" type="button">Start flight</button>
+      <dl>
+        <div><dt>Pipes passed</dt><dd id="score">0</dd></div>
+        <div><dt>Last decision</dt><dd id="action">None</dd></div>
+        <div><dt>Option probability</dt><dd id="probability">n/a</dd></div>
+        <div><dt>API round trip</dt><dd id="latency">n/a</dd></div>
+      </dl>
+      <p id="status" role="status" aria-live="polite">Ready. Your API is the pilot.</p>
+      <small>The world pauses while the API thinks, then advances 0.15 seconds. Models can make bad decisions. Crashing is part of the experiment.</small>
+    </aside>
+  </div>
+  <footer>Same-origin requests to <code>/v1/decisions</code>. No libraries, no stored API keys.</footer>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const canvas = $("game"), ctx = canvas.getContext("2d");
+const floor = 520, birdX = 106, radius = 13, gravity = 900, flapVelocity = -290, pipeSpeed = 130;
+let bird, pipes, score, crashed, session = null;
+
+function newPipe(x) {
+  const top = 60 + Math.random() * 220;
+  return { x, top, bottom: top + 180, counted: false };
+}
+
+function reset() {
+  bird = { y: 240, velocity: 0 };
+  pipes = [newPipe(420), newPipe(660)];
+  score = 0;
+  crashed = false;
+  $("score").textContent = "0";
+  $("action").textContent = "None";
+  $("probability").textContent = $("latency").textContent = "n/a";
+  draw();
+}
+
+function step(dt) {
+  bird.velocity += gravity * dt;
+  bird.y += bird.velocity * dt;
+  for (const pipe of pipes) {
+    pipe.x -= pipeSpeed * dt;
+    if (!pipe.counted && pipe.x + 62 < birdX - radius) {
+      pipe.counted = true;
+      $("score").textContent = String(++score);
+    }
+  }
+  if (pipes[0].x + 62 < 0) {
+    pipes.shift();
+    pipes.push(newPipe(pipes[pipes.length - 1].x + 240));
+  }
+  // ponytail: bounding-box collisions; use circle-rectangle tests for precise corners.
+  crashed = bird.y - radius <= 0 || bird.y + radius >= floor || pipes.some(pipe =>
+    birdX + radius > pipe.x && birdX - radius < pipe.x + 62 &&
+    (bird.y - radius < pipe.top || bird.y + radius > pipe.bottom));
+  return !crashed;
+}
+
+function draw() {
+  ctx.fillStyle = "#d9eef0";
+  ctx.fillRect(0, 0, 480, 560);
+  ctx.fillStyle = "#f7fcf8";
+  for (const [x, y] of [[70, 85], [280, 145], [440, 65]]) {
+    ctx.beginPath(); ctx.ellipse(x, y, 45, 13, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  for (const pipe of pipes) {
+    ctx.fillStyle = "#49835b";
+    ctx.fillRect(pipe.x, 0, 62, pipe.top);
+    ctx.fillRect(pipe.x, pipe.bottom, 62, floor - pipe.bottom);
+    ctx.fillStyle = "#326648";
+    ctx.fillRect(pipe.x - 4, pipe.top - 16, 70, 16);
+    ctx.fillRect(pipe.x - 4, pipe.bottom, 70, 16);
+    ctx.fillStyle = "#77a780";
+    ctx.fillRect(pipe.x + 7, 0, 7, pipe.top - 16);
+    ctx.fillRect(pipe.x + 7, pipe.bottom + 16, 7, floor - pipe.bottom - 16);
+  }
+  ctx.fillStyle = "#d1b98a"; ctx.fillRect(0, floor, 480, 40);
+  ctx.fillStyle = "#6c945d"; ctx.fillRect(0, floor, 480, 7);
+  ctx.save(); ctx.translate(birdX, bird.y); ctx.rotate(Math.max(-.5, Math.min(.8, bird.velocity / 500)));
+  ctx.fillStyle = "#f5b84b";
+  ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#cf8737";
+  ctx.beginPath(); ctx.ellipse(-5, 4, 7, 4, -.2, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#fffdf7";
+  ctx.beginPath(); ctx.arc(6, -4, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#26392e";
+  ctx.beginPath(); ctx.arc(8, -4, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#bd623a";
+  ctx.beginPath(); ctx.moveTo(11, 1); ctx.lineTo(23, 4); ctx.lineTo(11, 7); ctx.fill();
+  ctx.restore();
+  if (crashed) {
+    ctx.fillStyle = "#26392e"; ctx.font = "bold 30px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("Flight over", 240, 260);
+  }
+}
+
+function observation() {
+  const pipe = pipes.find(pipe => pipe.x + 62 >= birdX - radius);
+  const position = bird.y < pipe.top + radius ? "above" : bird.y > pipe.bottom - radius ? "below" : "inside";
+  return {
+    game: "Flappy Bird: avoid pipes, ceiling and floor. Y increases downward.",
+    bird: { y: Math.round(bird.y), velocity_y: Math.round(bird.velocity), radius },
+    next_pipe: { distance_x: Math.round(pipe.x - birdX), gap_top: Math.round(pipe.top),
+      gap_bottom: Math.round(pipe.bottom), gap_center: Math.round((pipe.top + pipe.bottom) / 2) },
+    position: `The bird is ${position} the opening and is ${bird.velocity < 0 ? "rising" : "falling"}.`,
+    physics: { gravity, flap_velocity: flapVelocity, pipe_speed: pipeSpeed, floor_y: floor, turn_seconds: .15 }
+  };
+}
+
+async function api(path, options, flight) {
+  const headers = { "Content-Type": "application/json" };
+  if ($("key").value) headers.Authorization = `Bearer ${$("key").value}`;
+  const response = await fetch(path, { ...options, headers,
+    signal: AbortSignal.any([flight.signal, AbortSignal.timeout(15000)]) });
+  const data = await response.json();
+  if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : `API returned HTTP ${response.status}`);
+  return data;
+}
+
+async function startGame() {
+  const flight = new AbortController();
+  session = flight;
+  $("start").textContent = "Stop flight";
+  $("model").disabled = $("key").disabled = true;
+  reset();
+  try {
+    $("status").textContent = "Checking available models…";
+    const health = await api("/health", {}, flight);
+    if (flight.signal.aborted) return;
+    if (!Array.isArray(health.models) || !health.models.length) throw new Error("No models are available.");
+    for (const option of $("model").options) option.disabled = !health.models.includes(option.value);
+    if (!health.models.includes($("model").value)) $("model").value = health.models[0];
+    while (!flight.signal.aborted && !crashed) {
+      $("status").textContent = `${$("model").value} is thinking…`;
+      const started = performance.now();
+      const result = await api("/v1/decisions", { method: "POST", body: JSON.stringify({
+        model: $("model").value, state: observation(), questions: { move: {
+          type: "choice", instructions: "Choose the bird's next action to stay alive. Aim for the next pipe opening. " +
+            "Flapping moves up; waiting lets gravity pull down. Avoid flapping into the ceiling or upper pipe.",
+          criteria: { flap: "Flap now to gain height", wait: "Do not flap; continue coasting under gravity" }
+        } }
+      }) }, flight);
+      if (flight.signal.aborted) return;
+      const answer = result.answers?.move, action = answer?.choice, probability = answer?.probabilities?.[action];
+      if (!["flap", "wait"].includes(action) || !Number.isFinite(probability) || probability < 0 || probability > 1)
+        throw new Error("The API returned an invalid flap/wait decision.");
+      $("action").textContent = action.toUpperCase();
+      $("probability").textContent = `${(probability * 100).toFixed(1)}%`;
+      $("latency").textContent = `${Math.round(performance.now() - started)} ms`;
+      $("status").textContent = action === "flap" ? "A little lift." : "Coasting.";
+      if (action === "flap") bird.velocity = flapVelocity;
+      // ponytail: pause simulation during inference; predictive async control for real-time flight.
+      for (let frame = 0; frame < 9 && !crashed; frame++) {
+        await new Promise(requestAnimationFrame);
+        if (flight.signal.aborted) return;
+        step(1 / 60);
+        draw();
+      }
+    }
+    $("status").textContent = `Flight over. ${score} pipes passed. Try another flight or model.`;
+  } catch (error) {
+    if (!flight.signal.aborted) $("status").textContent = `Flight stopped: ${error.message}`;
+  } finally {
+    if (session === flight) {
+      session = null;
+      $("start").textContent = "Start flight";
+      $("model").disabled = $("key").disabled = false;
+    }
+  }
+}
+
+function stopGame() {
+  session?.abort();
+  $("status").textContent = "Stopped. Start again for a fresh flight.";
+}
+
+$("start").addEventListener("click", () => session ? stopGame() : startGame());
+reset();
+</script>
+</body>
+</html>

@@ -52,8 +52,8 @@ curl http://127.0.0.1:8001/health -H 'Authorization: Bearer demo'
 ```
 
 Missing or invalid tokens return HTTP 401. Unset or empty `API_KEY` disables
-authentication. The key is read at startup. Interactive docs and the OpenAPI schema
-remain public; use the docs' **Authorize** button to enter your token.
+authentication. The key is read at startup. Interactive docs, the OpenAPI schema,
+and the game page remain public; use the docs' **Authorize** button to enter your token.
 
 ## Request
 
@@ -92,6 +92,17 @@ No fabricated billing or provider metadata.
 For access from other machines, set a strong `API_KEY` and use HTTPS through a reverse
 proxy to protect the token in transit. Run one worker to avoid duplicate model loads.
 
+## Floppybird
+
+Open <http://127.0.0.1:8001/floppybird.html> on the running server (use its actual
+host and port if different). Select a model, enter the API key if required, and
+click **Start flight**. The page detects enabled models from `/health` and sends
+flap/wait questions to `/v1/decisions` on the same origin, so no CORS setup is needed.
+
+The simulation pauses during each API request, then advances 0.15 seconds.
+Only one request is in flight; **Stop flight** cancels it. API keys stay in the page's
+memory and are never stored. A model may crash the bird; there is no fallback autopilot.
+
 ## Check without downloading weights
 
 ```sh
@@ -100,7 +111,12 @@ python -m unittest test_server.py
 ```
 
 The check stubs Laya and exercises the real HTTP routes, validation, and error handling.
-It does not verify real-model inference.
+It does not verify real-model inference. With Node.js installed, check game physics,
+HTTP payloads, cancellation, and error handling without a browser or model:
+
+```sh
+node test_floppybird.js
+```
 
 ## Evaluate real models
 

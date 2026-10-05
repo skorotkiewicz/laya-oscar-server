@@ -5,10 +5,12 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, StrictStr, model_validator
 
@@ -89,15 +91,20 @@ def require_api_key(
         )
 
 
-app = FastAPI(title="Laya and Oscar API", lifespan=lifespan, dependencies=[Depends(require_api_key)])
+app = FastAPI(title="Laya and Oscar API", lifespan=lifespan)
 
 
-@app.get("/health")
+@app.get("/floppybird.html", include_in_schema=False)
+def floppybird():
+    return FileResponse(Path(__file__).with_name("floppybird.html"))
+
+
+@app.get("/health", dependencies=[Depends(require_api_key)])
 def health():
     return {"status": "ok", "models": list(app.state.agents)}
 
 
-@app.post("/v1/decisions")
+@app.post("/v1/decisions", dependencies=[Depends(require_api_key)])
 def decisions(body: DecisionRequest):
     questions = {key: question.model_dump(exclude_none=True) for key, question in body.questions.items()}
     model = "laya" if body.model in ("laya", CHECKPOINTS["laya"]) else "oscar-1"

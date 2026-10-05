@@ -1,5 +1,6 @@
 """HTTP API for Oscar and Laya checkpoints."""
 
+import hmac
 import json
 import logging
 import os
@@ -7,7 +8,8 @@ from contextlib import asynccontextmanager
 from threading import Lock
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, StrictStr, model_validator
 
 CHECKPOINTS = {
@@ -57,6 +59,7 @@ class DecisionRequest(BaseModel):
 async def lifespan(app: FastAPI):
     import laya
 
+    app.state.api_key = os.getenv("API_KEY")
     app.state.agents = {
         name: laya.load(checkpoint, device=os.getenv("LAYA_DEVICE") or None)
         for name, checkpoint in CHECKPOINTS.items()
@@ -69,7 +72,20 @@ async def lifespan(app: FastAPI):
         del app.state.agents
 
 
-app = FastAPI(title="Laya and Oscar API", lifespan=lifespan)
+def require_api_key(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(HTTPBearer(auto_error=False))],
+):
+    key = app.state.api_key
+    if key and not hmac.compare_digest(
+        (credentials.credentials if credentials else "").encode("utf-8"), key.encode("utf-8")
+    ):
+        raise HTTPException(
+            status_code=401, detail="invalid or missing access token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+app = FastAPI(title="Laya and Oscar API", lifespan=lifespan, dependencies=[Depends(require_api_key)])
 
 
 @app.get("/health")

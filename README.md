@@ -23,6 +23,23 @@ Interactive API docs (default address): <http://127.0.0.1:8001/docs>.
 Health check: `curl http://127.0.0.1:8001/health`.
 Set `LAYA_DEVICE=cpu` or `LAYA_DEVICE=cuda` to request a device; otherwise Laya chooses.
 
+## Optional API key
+
+```sh
+API_KEY="demo" python server.py
+```
+
+When `API_KEY` is set to a non-empty value, `/v1/decisions` and `/health` require
+an `Authorization: Bearer <API_KEY>` header. Add it to your curl requests:
+
+```sh
+curl http://127.0.0.1:8001/health -H 'Authorization: Bearer demo'
+```
+
+Missing or invalid tokens return HTTP 401. Unset or empty `API_KEY` disables
+authentication. The key is read at startup. Interactive docs and the OpenAPI schema
+remain public; use the docs' **Authorize** button to enter your token.
+
 ## Request
 
 ```sh
@@ -57,8 +74,8 @@ object or a list; score criteria require a list. Answers and usage pass through 
 Laya unchanged, with `model` set to `"oscar-1"` or `"laya"` to match the selected model.
 No fabricated billing or provider metadata.
 
-This is a local API without authentication. Use an authenticated reverse proxy before
-exposing it to other machines. Run one worker to avoid duplicate model loads.
+For access from other machines, set a strong `API_KEY` and use HTTPS through a reverse
+proxy to protect the token in transit. Run one worker to avoid duplicate model loads.
 
 ## Check without downloading weights
 

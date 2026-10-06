@@ -83,6 +83,17 @@ Errors are never cached. Cached responses, including their original usage, are u
 Keep Redis private or authenticated. If weights or inference behavior change at the
 same checkpoint source, clear this cache's keys or bump the `v1` prefix in `server.py`.
 
+Check eight identical requests with `Authorization: Bearer demo`:
+
+```sh
+python check_cache.py --url http://192.168.0.124:8001 --model oscar-1
+```
+
+Use an enabled model (`--model laya` for Laya-only servers). If authentication is
+enabled, start the server with `API_KEY="demo"`. The check expects one MISS followed
+by seven HITs with identical responses, prints timings and response bodies, and exits
+nonzero if caching fails. A unique marker per run avoids reusing an already-warm key.
+
 ## Request
 
 ```sh

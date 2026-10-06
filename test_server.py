@@ -45,38 +45,37 @@ class ServerTest(unittest.TestCase):
             },
             "usage": {"input_tokens": 42, "output_tokens": 0},
         }
-        agent = Mock()
-        agent.predict.return_value = result
-        laya_agent = Mock()
-        laya_agent.predict.return_value = {**result, "usage": {"input_tokens": 100, "output_tokens": 0}}
-        agents = {"oscar-1": agent, "laya": laya_agent}
+        agents = {name: Mock() for name in CHECKPOINTS}
+        for i, selected in enumerate(agents.values()):
+            selected.predict.return_value = {**result, "usage": {"input_tokens": 42 + i, "output_tokens": 0}}
+        agent = agents["oscar-1"]
         load = Mock(side_effect=lambda checkpoint, **kwargs: agents[next(
             name for name, source in CHECKPOINTS.items() if source == checkpoint
         )])
         with patch.dict(os.environ, {"API_KEY": "", "MODEL": ""}), patch.dict(sys.modules, {"laya": SimpleNamespace(load=load)}):
             with TestClient(app) as client:
-                self.assertEqual(load.call_count, 2)
+                self.assertEqual(load.call_count, len(CHECKPOINTS))
                 self.assertEqual([call.args for call in load.call_args_list], [(source,) for source in CHECKPOINTS.values()])
-                self.assertEqual(client.get("/health").json(), {"status": "ok", "models": ["oscar-1", "laya"]})
+                self.assertEqual(client.get("/health").json(), {"status": "ok", "models": list(CHECKPOINTS)})
+                schema = client.get("/openapi.json")
+                self.assertEqual(schema.status_code, 200)
+                model_schema = schema.json()["components"]["schemas"]["DecisionRequest"]["properties"]["model"]
+                self.assertEqual(set(model_schema["enum"]), set(CHECKPOINTS) | set(CHECKPOINTS.values()))
                 for state in ("Zoë needs a refund.", {"text": "Zoë needs a refund."}):
                     response = client.post("/v1/decisions", json={"state": state, "questions": questions})
                     self.assertEqual(response.status_code, 200)
                     self.assertEqual(response.json(), {**result, "model": "oscar-1"})
                     agent.predict.assert_called_with(state, questions)
 
-                for model, name in (
-                    ("oscar-1", "oscar-1"), ("mgoeckel/oscar-1-400m", "oscar-1"),
-                    ("laya", "laya"), ("convaiinnovations/laya", "laya"),
-                    ("oscar-1", "oscar-1"),
-                ):
-                    selected, other = agents[name], agents["laya" if name == "oscar-1" else "oscar-1"]
-                    other_calls = other.predict.call_count
+                for model, name in ((alias, name) for name, source in CHECKPOINTS.items() for alias in (name, source)):
+                    selected = agents[name]
+                    other_calls = {key: value.predict.call_count for key, value in agents.items() if key != name}
                     response = client.post("/v1/decisions", json={"model": model, "state": "hello", "questions": questions})
                     self.assertEqual(response.status_code, 200)
                     self.assertEqual(response.json(), {**selected.predict.return_value, "model": name})
                     selected.predict.assert_called_with("hello", questions)
-                    self.assertEqual(other.predict.call_count, other_calls)
-                self.assertEqual(load.call_count, 2)
+                    self.assertEqual({key: value.predict.call_count for key, value in agents.items() if key != name}, other_calls)
+                self.assertEqual(load.call_count, len(CHECKPOINTS))
 
                 calls = [agent.predict.call_count for agent in agents.values()]
                 for invalid in (
@@ -103,7 +102,7 @@ class ServerTest(unittest.TestCase):
 
     def test_model_selection(self):
         body = {"state": "hello", "questions": {"x": {"type": "noul", "instructions": "Is this a greeting?"}}}
-        for selection in (None, "", "laya", "oscar-1", "unknown"):
+        for selection in (None, "", *CHECKPOINTS, "unknown"):
             agent = Mock()
             agent.predict.return_value = {"answers": {"x": {"type": "noul", "noul": 0.9}}}
             load = Mock(return_value=agent)
@@ -131,7 +130,7 @@ class ServerTest(unittest.TestCase):
                                 self.assertEqual(response.json(), {"detail": f"model '{name}' is not enabled on this server"})
                                 self.assertEqual(agent.predict.call_count, calls)
                     # Omitting the request model still defaults to Oscar.
-                    self.assertEqual(client.post("/v1/decisions", json=body).status_code, 422 if selection == "laya" else 200)
+                    self.assertEqual(client.post("/v1/decisions", json=body).status_code, 200 if "oscar-1" in enabled else 422)
                     self.assertEqual(load.call_count, len(enabled))
 
     def test_optional_api_key(self):

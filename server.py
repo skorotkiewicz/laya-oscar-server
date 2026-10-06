@@ -15,8 +15,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, StrictStr, model_validator
 
 CHECKPOINTS = {
+    # "oscar-1-17m": "mgoeckel/oscar-1-17m",
+    # "oscar-1-32m": "mgoeckel/oscar-1-32m",
+    # "oscar-1-68m": "mgoeckel/oscar-1-68m",
+    # "oscar-1-150m": "mgoeckel/oscar-1-150m",
     "oscar-1": "mgoeckel/oscar-1-400m",
     "laya": "convaiinnovations/laya",
+    # "laya-multilingual": "convaiinnovations/laya-multilingual",
+    # "laya-typed-decisions": "convaiinnovations/laya-typed-decisions",
 }
 Text = Annotated[StrictStr, Field(min_length=1, max_length=4096)]
 Criteria = (
@@ -46,7 +52,13 @@ class Question(BaseModel):
 
 
 class DecisionRequest(BaseModel):
-    model: Literal["oscar-1", "mgoeckel/oscar-1-400m", "laya", "convaiinnovations/laya"] = "oscar-1"
+    model: Literal[
+        "oscar-1", "mgoeckel/oscar-1-400m",
+        "laya", "convaiinnovations/laya",
+        # "oscar-1-small", "mgoeckel/oscar-1-17m",
+        # "laya-multilingual", "convaiinnovations/laya-multilingual",
+        # "laya-typed-decisions", "convaiinnovations/laya-typed-decisions"
+    ] = "oscar-1"
     state: Annotated[StrictStr, Field(min_length=1, max_length=50000)] | dict[str, object]
     questions: Annotated[dict[Text, Question], Field(min_length=1, max_length=64)]
 
@@ -63,7 +75,7 @@ async def lifespan(app: FastAPI):
 
     selected = os.getenv("MODEL") or None
     if selected is not None and selected not in CHECKPOINTS:
-        raise ValueError("MODEL must be 'laya' or 'oscar-1'")
+        raise ValueError(f"MODEL must be one of {', '.join(CHECKPOINTS)}")
     app.state.api_key = os.getenv("API_KEY")
     app.state.agents = {
         name: laya.load(checkpoint, device=os.getenv("LAYA_DEVICE") or None)
@@ -107,7 +119,7 @@ def health():
 @app.post("/v1/decisions", dependencies=[Depends(require_api_key)])
 def decisions(body: DecisionRequest):
     questions = {key: question.model_dump(exclude_none=True) for key, question in body.questions.items()}
-    model = "laya" if body.model in ("laya", CHECKPOINTS["laya"]) else "oscar-1"
+    model = next(name for name, checkpoint in CHECKPOINTS.items() if body.model in (name, checkpoint))
     if model not in app.state.agents:
         raise HTTPException(status_code=422, detail=f"model '{model}' is not enabled on this server")
     try:

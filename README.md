@@ -14,6 +14,16 @@ pip install -r requirements.txt
 python server.py
 ```
 
+or, older gpus
+
+```sh
+python3.13 -m venv .venv-cu118
+source .venv-cu118/bin/activate
+
+python -m pip install torch --index-url https://download.pytorch.org/whl/cu118
+python -m pip install -r requirements.txt
+```
+
 Defaults to `HOST=127.0.0.1` and `PORT=8001`. Override with:
 
 ```sh

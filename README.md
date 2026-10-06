@@ -45,8 +45,8 @@ MODEL="oscar-1" python server.py
 Unset or empty `MODEL` keeps the current behavior: both models load.
 Requests for a disabled model return HTTP 422; `/health` lists only loaded models.
 An unsupported `MODEL` value fails at startup before loading any checkpoint.
-The request `model` still defaults to `oscar-1`, so include `"model": "laya"`
-when running in Laya-only mode. Configuration is read at startup.
+Every decision request must include `model`, even when only one checkpoint is
+loaded. Configuration is read at startup.
 
 ## Optional API key
 
@@ -64,6 +64,24 @@ curl http://127.0.0.1:8001/health -H 'Authorization: Bearer demo'
 Missing or invalid tokens return HTTP 401. Unset or empty `API_KEY` disables
 authentication. The key is read at startup. Interactive docs, the OpenAPI schema,
 and the game page remain public; use the docs' **Authorize** button to enter your token.
+
+## Optional Redis cache
+
+```sh
+REDIS_URL="redis://127.0.0.1:6379/0" python server.py
+```
+
+Unset or empty `REDIS_URL` disables caching and runs the model as before. With Redis
+enabled, successful responses are cached for one hour. SHA-256 keys include the
+resolved model, checkpoint source, state, and validated questions. Formatting and
+model aliases normalize to the same key; criteria order is preserved because it
+can affect predictions. Authentication and model availability are checked first.
+
+Successful responses include `X-Cache: HIT`, `MISS`, or `BYPASS`. Redis read/write
+failures fall back to normal inference with short timeouts and no automatic retries.
+Errors are never cached. Cached responses, including their original usage, are unchanged.
+Keep Redis private or authenticated. If weights or inference behavior change at the
+same checkpoint source, clear this cache's keys or bump the `v1` prefix in `server.py`.
 
 ## Request
 
@@ -92,7 +110,7 @@ curl http://127.0.0.1:8001/v1/decisions \
   }'
 ```
 
-`model` is optional and defaults to `oscar-1`. Change `"model": "oscar-1"` to
+`model` is required; omitting it returns HTTP 422. Change `"model": "oscar-1"` to
 `"model": "laya"` to use `convaiinnovations/laya`. Both full checkpoint IDs are also accepted.
 `state` accepts a string or a JSON object. Choice criteria accept a label-to-description
 object or a list; score criteria require a list. Answers and usage pass through from

@@ -1,5 +1,6 @@
 """HTTP API for Oscar and Laya checkpoints."""
 
+import hashlib
 import hmac
 import json
 import logging
@@ -9,10 +10,13 @@ from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, StrictStr, model_validator
+from redis import Redis, RedisError
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 
 CHECKPOINTS = {
     # "oscar-1-17m": "mgoeckel/oscar-1-17m",
@@ -58,7 +62,7 @@ class DecisionRequest(BaseModel):
         # "oscar-1-small", "mgoeckel/oscar-1-17m",
         # "laya-multilingual", "convaiinnovations/laya-multilingual",
         # "laya-typed-decisions", "convaiinnovations/laya-typed-decisions"
-    ] = "oscar-1"
+    ]
     state: Annotated[StrictStr, Field(min_length=1, max_length=50000)] | dict[str, object]
     questions: Annotated[dict[Text, Question], Field(min_length=1, max_length=64)]
 
@@ -82,11 +86,18 @@ async def lifespan(app: FastAPI):
         for name, checkpoint in CHECKPOINTS.items()
         if selected is None or name == selected
     }
-    # ponytail: one inference at a time; batch requests if throughput matters.
+    redis_url = os.getenv("REDIS_URL")
+    app.state.cache = Redis.from_url(
+        redis_url, decode_responses=True, socket_connect_timeout=0.5,
+        socket_timeout=0.5, retry=Retry(NoBackoff(), 0),
+    ) if redis_url else None
+    # ponytail: global cache/inference lock; move hit lookups outside if cache latency matters.
     app.state.inference_lock = Lock()
     try:
         yield
     finally:
+        if app.state.cache is not None:
+            app.state.cache.close()
         del app.state.agents
 
 
@@ -117,15 +128,43 @@ def health():
 
 
 @app.post("/v1/decisions", dependencies=[Depends(require_api_key)])
-def decisions(body: DecisionRequest):
+def decisions(body: DecisionRequest, response: Response):
     questions = {key: question.model_dump(exclude_none=True) for key, question in body.questions.items()}
     model = next(name for name, checkpoint in CHECKPOINTS.items() if body.model in (name, checkpoint))
     if model not in app.state.agents:
         raise HTTPException(status_code=422, detail=f"model '{model}' is not enabled on this server")
+    response.headers["X-Cache"] = "BYPASS"
     try:
+        cache = app.state.cache
+        if cache is not None:
+            payload = {"model": model, "checkpoint": CHECKPOINTS[model], "state": body.state, "questions": questions}
+            # Preserve mapping order: choice option order can affect predictions.
+            digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+            # ponytail: source-based identity; bump v1 if weights change at the same source.
+            cache_key = "laya:decisions:v1:" + digest
         with app.state.inference_lock:
-            result = app.state.agents[model].predict(body.state, questions)
-        return {**result, "model": model}
+            if cache is not None:
+                try:
+                    cached = cache.get(cache_key)
+                    if cached is not None:
+                        result = json.loads(cached)
+                        if not isinstance(result, dict) or result.get("model") != model or not isinstance(result.get("answers"), dict):
+                            raise ValueError("invalid cached response")
+                        response.headers["X-Cache"] = "HIT"
+                        return result
+                except RedisError:
+                    logging.warning("Redis cache read failed; using model")
+                    cache = None
+                except (ValueError, TypeError):
+                    logging.warning("Invalid cached response; using model")
+            result = {**app.state.agents[model].predict(body.state, questions), "model": model}
+            if cache is not None:
+                try:
+                    cache.set(cache_key, json.dumps(result, ensure_ascii=False, allow_nan=False), ex=3600)
+                    response.headers["X-Cache"] = "MISS"
+                except (RedisError, ValueError, TypeError):
+                    logging.warning("Redis cache write failed; returning model response")
+        return result
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:

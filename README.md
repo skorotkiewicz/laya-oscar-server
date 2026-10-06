@@ -1,9 +1,11 @@
 # Laya and Oscar HTTP API
 
-Serves `mgoeckel/oscar-1-400m` and `convaiinnovations/laya` via `POST /v1/decisions`.
-By default, both models load once at startup. Set `MODEL` to load only one.
-First startup downloads the enabled checkpoints from Hugging Face and requires
-internet access and enough memory for those models.
+Run `mgoeckel/oscar-1-400m` and `convaiinnovations/laya` through
+`POST /v1/decisions`. The server loads both models once at startup unless you
+select one with `MODEL`.
+
+The first run downloads the enabled checkpoints from Hugging Face. You'll need
+internet access and enough memory to load them.
 
 ## Run
 
@@ -14,92 +16,50 @@ pip install -r requirements.txt
 python server.py
 ```
 
-or, older gpus
+If your GPU needs the CUDA 11.8 PyTorch build, install it before the other
+requirements:
 
 ```sh
 python3.13 -m venv .venv-cu118
-source .venv-cu118/bin/activate
-
+. .venv-cu118/bin/activate
 python -m pip install torch --index-url https://download.pytorch.org/whl/cu118
 python -m pip install -r requirements.txt
+python server.py
 ```
 
-Defaults to `HOST=127.0.0.1` and `PORT=8001`. Override with:
+The default address is `http://127.0.0.1:8001`. To change it:
 
 ```sh
 HOST=127.0.0.1 PORT=8080 python server.py
 ```
 
-Interactive API docs (default address): <http://127.0.0.1:8001/docs>.
-Health check: `curl http://127.0.0.1:8001/health`.
-Set `LAYA_DEVICE=cpu` or `LAYA_DEVICE=cuda` to request a device; otherwise Laya chooses.
-
-## Optional model selection
+At the default address, open <http://127.0.0.1:8001/docs> for interactive API docs
+or check the server with:
 
 ```sh
-MODEL="laya" python server.py
-# Or load only Oscar:
-MODEL="oscar-1" python server.py
+curl http://127.0.0.1:8001/health
 ```
 
-Unset or empty `MODEL` keeps the current behavior: both models load.
-Requests for a disabled model return HTTP 422; `/health` lists only loaded models.
-An unsupported `MODEL` value fails at startup before loading any checkpoint.
-Every decision request must include `model`, even when only one checkpoint is
-loaded. Configuration is read at startup.
+Set `LAYA_DEVICE=cpu` or `LAYA_DEVICE=cuda` to choose a device. Otherwise, Laya
+chooses it.
 
-## Optional API key
+## Choose a model
 
 ```sh
-API_KEY="demo" python server.py
+MODEL=laya python server.py
+# Load only Oscar instead:
+MODEL=oscar-1 python server.py
 ```
 
-When `API_KEY` is set to a non-empty value, `/v1/decisions` and `/health` require
-an `Authorization: Bearer <API_KEY>` header. Add it to your curl requests:
+Unset or empty `MODEL` loads both models. An unsupported value stops startup
+before any checkpoint loads. `/health` lists the loaded models, and requests
+for a disabled model return HTTP 422.
 
-```sh
-curl http://127.0.0.1:8001/health -H 'Authorization: Bearer demo'
-```
+Every decision request needs a `model`, even if the server has only one model
+loaded. The server reads configuration at startup, so restart it after changing
+environment variables.
 
-Missing or invalid tokens return HTTP 401. Unset or empty `API_KEY` disables
-authentication. The key is read at startup. Interactive docs, the OpenAPI schema,
-and the game page remain public; use the docs' **Authorize** button to enter your token.
-
-## Optional Redis cache
-
-```sh
-REDIS_URL="redis://127.0.0.1:6379/0" python server.py
-```
-
-Unset or empty `REDIS_URL` disables caching and runs the model as before. With Redis
-enabled, successful responses are cached for one hour. SHA-256 keys include the
-resolved model, checkpoint source, state, and validated questions. Formatting and
-model aliases normalize to the same key; criteria order is preserved because it
-can affect predictions. Authentication and model availability are checked first.
-
-When `REDIS_URL` is set, Redis is required: startup checks the connection before
-loading models and aborts if it fails. The server checks Redis every five seconds
-while running, on `/health`, and during cache operations. Any Redis error triggers
-graceful server shutdown instead of falling back to inference; affected API requests
-return HTTP 503. Connections use short timeouts and no automatic retries.
-
-Successful responses include `X-Cache: HIT`, `MISS`, or `BYPASS`. Errors are never
-cached. Cached responses, including their original usage, are unchanged.
-Keep Redis private or authenticated. If weights or inference behavior change at the
-same checkpoint source, clear this cache's keys or bump the `v1` prefix in `server.py`.
-
-Check eight identical requests with `Authorization: Bearer demo`:
-
-```sh
-python check_cache.py --url http://192.168.0.124:8001 --model oscar-1
-```
-
-Use an enabled model (`--model laya` for Laya-only servers). If authentication is
-enabled, start the server with `API_KEY="demo"`. The check expects one MISS followed
-by seven HITs with identical responses, prints timings and response bodies, and exits
-nonzero if caching fails. A unique marker per run avoids reusing an already-warm key.
-
-## Request
+## Send a request
 
 ```sh
 curl http://127.0.0.1:8001/v1/decisions \
@@ -126,29 +86,97 @@ curl http://127.0.0.1:8001/v1/decisions \
   }'
 ```
 
-`model` is required; omitting it returns HTTP 422. Change `"model": "oscar-1"` to
-`"model": "laya"` to use `convaiinnovations/laya`. Both full checkpoint IDs are also accepted.
-`state` accepts a string or a JSON object. Choice criteria accept a label-to-description
-object or a list; score criteria require a list. Answers and usage pass through from
-Laya unchanged, with `model` set to `"oscar-1"` or `"laya"` to match the selected model.
-No fabricated billing or provider metadata.
+Use `"model": "laya"` for Laya. The full checkpoint IDs also work. Omitting
+`model` returns HTTP 422.
 
-For access from other machines, set a strong `API_KEY` and use HTTPS through a reverse
-proxy to protect the token in transit. Run one worker to avoid duplicate model loads.
+`state` can be a string or a JSON object. For `choice`, supply criteria as a list
+or an object mapping labels to descriptions. For `score`, supply a list.
+
+The server returns Laya's answers and usage unchanged, with `model` set to
+`"oscar-1"` or `"laya"`. It adds no billing or provider metadata.
+
+## Require an API key
+
+```sh
+API_KEY="demo" python server.py
+```
+
+A non-empty `API_KEY` protects `/v1/decisions` and `/health`. Send it as a bearer
+token:
+
+```sh
+curl http://127.0.0.1:8001/health -H 'Authorization: Bearer demo'
+```
+
+Add the same header to decision requests. Missing or invalid tokens return
+HTTP 401. Unset or empty `API_KEY` turns authentication off.
+
+The docs, OpenAPI schema, and game page stay public. Use the docs' **Authorize**
+button to enter your token.
+
+For access from other machines, set a strong key and put the server behind an
+HTTPS reverse proxy. Run one worker to avoid loading duplicate copies of the
+models.
+
+## Cache responses with Redis
+
+```sh
+REDIS_URL="redis://127.0.0.1:6379/0" python server.py
+```
+
+Unset or empty `REDIS_URL` disables caching. When enabled, the server caches
+successful responses for one hour. SHA-256 keys include the resolved model,
+checkpoint source, state, and validated questions. Request formatting and model
+aliases normalize to the same key. Criteria order stays intact because it can
+affect predictions. The server checks authentication and model availability
+before looking up a cached response.
+
+Redis is required once you set `REDIS_URL`. The server checks the connection
+before loading models and aborts startup if it fails. It also checks Redis every
+five seconds, on `/health`, and during cache operations. A Redis error shuts down
+the server rather than falling back to inference. Affected API requests return
+HTTP 503. Connections use short timeouts with no automatic retries.
+
+Successful responses include an `X-Cache` header with `HIT`, `MISS`, or `BYPASS`.
+Errors are never cached. Cache hits return the original response, including its
+usage.
+
+Keep Redis private or authenticated. If you change weights or inference behavior
+without changing the checkpoint source, clear this cache's keys or bump the
+`v1` prefix in `server.py`.
+
+To check caching, run:
+
+```sh
+python check_cache.py --url http://127.0.0.1:8001 --model oscar-1
+```
+
+The check sends eight identical requests with `Authorization: Bearer demo`.
+If the server requires authentication, start it with `API_KEY="demo"`. Choose
+an enabled model, such as `--model laya` for a Laya-only server.
+
+The check expects one MISS followed by seven HITs, all with identical responses.
+It prints timings and response bodies, and exits nonzero on failure. Each run
+uses a unique marker so it starts with a cold cache key.
 
 ## Floppybird
 
-Open <http://127.0.0.1:8001/floppybird.html> on the running server (use its actual
-host and port if different). Select a model, enter the API key if required, and
-click **Start flight**. The page detects enabled models from `/health` and sends
-two `noul` questions to `/v1/decisions`: is the bird below the target height, and is
-it falling? The target is the next pipe opening's center. The explicit rule is
-**flap only when both probabilities are at least 0.5; otherwise wait**. Height and
-motion are also described in words. Requests use the same origin, so no CORS setup is needed.
+Open <http://127.0.0.1:8001/floppybird.html> on the running server. Use your
+server's host and port if they differ. Select a model, enter the API key if
+required, and click **Start flight**.
 
-The simulation pauses during each API request, then advances 0.15 seconds.
-Only one request is in flight; **Stop flight** cancels it. API keys stay in the page's
-memory and are never stored. A model may crash the bird; there is no fallback autopilot.
+The page checks `/health` for available models. Each turn, it sends two `noul`
+questions to `/v1/decisions`: is the bird below the target height, and is it
+falling? The target is the center of the next pipe opening. The state includes
+height and motion in words as well as numbers.
+
+The bird flaps only when both probabilities are at least 0.5. Otherwise it waits.
+The simulation pauses during each API request, then advances 0.15 seconds. Only
+one request runs at a time, and **Stop flight** cancels it.
+
+Requests use the same origin, so no CORS setup is needed. API keys stay in page
+memory and are never stored. There is no fallback autopilot. A model can crash
+the bird.
 
 ## Check without downloading weights
 
@@ -157,33 +185,44 @@ pip install httpx
 python -m unittest test_server.py
 ```
 
-The check stubs Laya and exercises the real HTTP routes, validation, and error handling.
-It does not verify real-model inference. With Node.js installed, check game physics,
-HTTP payloads, cancellation, and error handling without a browser or model:
+These tests stub Laya and exercise the real HTTP routes, validation, and error
+handling. They do not test real-model inference.
+
+With Node.js installed, check game physics, request payloads, cancellation, and
+error handling without a browser or model:
 
 ```sh
 node test_floppybird.js
-# Simulate a flight with the real API and reproducible pipe positions:
-node test_floppybird.js --live http://192.168.0.124:8001
 ```
 
-The live check stops on a crash or after 200 turns. Set `API_KEY` for an authenticated
-server. This checks a simple rule driven by model judgments, not a learned flight policy.
+To simulate a flight against the running API with reproducible pipe positions:
+
+```sh
+node test_floppybird.js --live http://127.0.0.1:8001
+```
+
+The live check stops on a crash or after 200 turns. Set `API_KEY` if the server
+requires authentication. It tests a fixed rule driven by model judgments, not a
+learned flight policy.
 
 ## Evaluate real models
 
 With the server running, compare both models against `cases.jsonl`:
 
 ```sh
-python check_cases.py --url http://192.168.0.124:8001
-# If authentication is enabled:
-API_KEY="demo" python check_cases.py --url http://192.168.0.124:8001
+python check_cases.py --url http://127.0.0.1:8001
+# If the server requires authentication:
+API_KEY="demo" python check_cases.py --url http://127.0.0.1:8001
 ```
 
 Use `--models laya` or `--models oscar-1` to check one model, and `--cases PATH`
-for another JSONL file. The default server URL is `http://127.0.0.1:8001`.
-Each row reports the expected answer, raw prediction, and probability assigned to the
-expected answer. A choice passes on an exact label match; noul uses a 0.5 threshold;
-score passes when it is less than 0.5 away from the expected zero-based rubric index.
-A passing answer can still have weak confidence, so inspect the probabilities too.
-Exit codes: 0 for all cases passing, 1 for mismatches, 2 for HTTP/connection errors.
+to use another JSONL file. The default URL is `http://127.0.0.1:8001`.
+
+Each row reports the expected answer, raw prediction, and probability assigned to
+the expected answer. A `choice` answer passes on an exact label match. A `noul`
+answer uses a 0.5 threshold. A `score` answer passes when it is less than 0.5 away
+from the expected zero-based rubric index.
+
+Check the probabilities too. A passing answer can still have weak confidence.
+The check exits with 0 if all cases pass, 1 for mismatches, or 2 for HTTP or
+connection errors.

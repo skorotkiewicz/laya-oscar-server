@@ -1,11 +1,13 @@
 """HTTP API for Oscar and Laya checkpoints."""
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
 import os
-from contextlib import asynccontextmanager
+import signal
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
@@ -73,32 +75,65 @@ class DecisionRequest(BaseModel):
         return self
 
 
+def redis_unavailable():
+    if not app.state.redis_failed:
+        app.state.redis_failed = True
+        logging.error("Redis unavailable; stopping server")
+        os.kill(os.getpid(), signal.SIGTERM)
+    return HTTPException(status_code=503, detail="Redis unavailable; server is shutting down")
+
+
+async def watch_redis():
+    while not app.state.redis_failed:
+        # ponytail: 5s polling; shorten the interval if faster idle-outage detection matters.
+        await asyncio.sleep(5)
+        try:
+            await asyncio.to_thread(app.state.cache.ping)
+        except RedisError:
+            redis_unavailable()
+            return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import laya
-
     selected = os.getenv("MODEL") or None
     if selected is not None and selected not in CHECKPOINTS:
         raise ValueError(f"MODEL must be one of {', '.join(CHECKPOINTS)}")
     app.state.api_key = os.getenv("API_KEY")
-    app.state.agents = {
-        name: laya.load(checkpoint, device=os.getenv("LAYA_DEVICE") or None)
-        for name, checkpoint in CHECKPOINTS.items()
-        if selected is None or name == selected
-    }
     redis_url = os.getenv("REDIS_URL")
     app.state.cache = Redis.from_url(
         redis_url, decode_responses=True, socket_connect_timeout=0.5,
         socket_timeout=0.5, retry=Retry(NoBackoff(), 0),
     ) if redis_url else None
-    # ponytail: global cache/inference lock; move hit lookups outside if cache latency matters.
-    app.state.inference_lock = Lock()
+    app.state.redis_failed = False
+    watcher = None
     try:
+        if app.state.cache is not None:
+            try:
+                app.state.cache.ping()
+            except RedisError as error:
+                raise RuntimeError("Redis unavailable; server startup aborted") from error
+        import laya
+
+        app.state.agents = {
+            name: laya.load(checkpoint, device=os.getenv("LAYA_DEVICE") or None)
+            for name, checkpoint in CHECKPOINTS.items()
+            if selected is None or name == selected
+        }
+        # ponytail: global cache/inference lock; move hit lookups outside if cache latency matters.
+        app.state.inference_lock = Lock()
+        if app.state.cache is not None:
+            watcher = asyncio.create_task(watch_redis())
         yield
     finally:
+        if watcher is not None:
+            watcher.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher
         if app.state.cache is not None:
             app.state.cache.close()
-        del app.state.agents
+        if hasattr(app.state, "agents"):
+            del app.state.agents
 
 
 def require_api_key(
@@ -124,6 +159,13 @@ def floppybird():
 
 @app.get("/health", dependencies=[Depends(require_api_key)])
 def health():
+    if app.state.redis_failed:
+        raise redis_unavailable()
+    if app.state.cache is not None:
+        try:
+            app.state.cache.ping()
+        except RedisError as error:
+            raise redis_unavailable() from error
     return {"status": "ok", "models": list(app.state.agents)}
 
 
@@ -143,6 +185,8 @@ def decisions(body: DecisionRequest, response: Response):
             # ponytail: source-based identity; bump v1 if weights change at the same source.
             cache_key = "laya:decisions:v1:" + digest
         with app.state.inference_lock:
+            if app.state.redis_failed:
+                raise redis_unavailable()
             if cache is not None:
                 try:
                     cached = cache.get(cache_key)
@@ -152,19 +196,24 @@ def decisions(body: DecisionRequest, response: Response):
                             raise ValueError("invalid cached response")
                         response.headers["X-Cache"] = "HIT"
                         return result
-                except RedisError:
-                    logging.warning("Redis cache read failed; using model")
-                    cache = None
+                except RedisError as error:
+                    raise redis_unavailable() from error
                 except (ValueError, TypeError):
                     logging.warning("Invalid cached response; using model")
+            if app.state.redis_failed:
+                raise redis_unavailable()
             result = {**app.state.agents[model].predict(body.state, questions), "model": model}
             if cache is not None:
                 try:
                     cache.set(cache_key, json.dumps(result, ensure_ascii=False, allow_nan=False), ex=3600)
                     response.headers["X-Cache"] = "MISS"
-                except (RedisError, ValueError, TypeError):
-                    logging.warning("Redis cache write failed; returning model response")
+                except RedisError as error:
+                    raise redis_unavailable() from error
+                except (ValueError, TypeError):
+                    logging.warning("Cache serialization failed; returning model response")
         return result
+    except HTTPException:
+        raise
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:

@@ -1,17 +1,19 @@
 """Run with: python -m unittest test_server.py (requires httpx)."""
 
+import asyncio
 import json
 import os
+import signal
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 from redis import RedisError
 
 from check_cases import assess
-from server import CHECKPOINTS, app
+from server import CHECKPOINTS, app, watch_redis
 
 
 class ServerTest(unittest.TestCase):
@@ -138,6 +140,32 @@ class ServerTest(unittest.TestCase):
                     self.assertEqual(client.post("/v1/decisions", json={key: value for key, value in body.items() if key != "model"}).status_code, 422)
                     self.assertEqual(load.call_count, len(enabled))
 
+    def test_redis_availability(self):
+        cache, load = Mock(), Mock()
+        cache.ping.side_effect = RedisError("offline")
+        with patch.dict(os.environ, {"REDIS_URL": "redis://localhost:6379/0"}, clear=True), \
+             patch.dict(sys.modules, {"laya": SimpleNamespace(load=load)}), \
+             patch("server.Redis.from_url", return_value=cache):
+            with self.assertRaisesRegex(RuntimeError, "Redis unavailable; server startup aborted"):
+                with TestClient(app):
+                    pass
+            load.assert_not_called()
+            cache.close.assert_called_once()
+
+            app.state.redis_failed = False
+            with patch("server.asyncio.sleep", new=AsyncMock()), patch("server.os.kill") as stop:
+                with self.assertLogs(level="ERROR"):
+                    asyncio.run(watch_redis())
+                self.assertTrue(app.state.redis_failed)
+                stop.assert_called_once_with(os.getpid(), signal.SIGTERM)
+
+            cache.ping.side_effect = [True, RedisError("offline")]
+            with patch("server.os.kill") as stop:
+                with TestClient(app) as client:
+                    with self.assertLogs(level="ERROR"):
+                        self.assertEqual(client.get("/health").status_code, 503)
+                    stop.assert_called_once_with(os.getpid(), signal.SIGTERM)
+
     def test_redis_cache(self):
         body = {"model": "oscar-1", "state": "Zoë sees a red ball.", "questions": {
             "color": {"type": "choice", "instructions": "What color is the ball?", "criteria": {"r": "Red", "b": "Blue"}}}}
@@ -145,11 +173,13 @@ class ServerTest(unittest.TestCase):
         agent.predict.return_value = {"answers": {"color": {"type": "choice", "choice": "r"}}}
         store = {}
         cache = Mock()
+        cache.ping.return_value = True
         cache.get.side_effect = store.get
         cache.set.side_effect = lambda key, value, **kwargs: store.__setitem__(key, value)
         with patch.dict(os.environ, {"REDIS_URL": "redis://localhost:6379/0", "API_KEY": "demo"}, clear=True), \
              patch.dict(sys.modules, {"laya": SimpleNamespace(load=Mock(return_value=agent))}), \
-             patch("server.Redis.from_url", return_value=cache) as connect:
+             patch("server.Redis.from_url", return_value=cache) as connect, \
+             patch("server.os.kill") as stop:
             with TestClient(app, headers={"Authorization": "Bearer demo"}) as client:
                 first = client.post("/v1/decisions", json=body)
                 self.assertEqual(first.status_code, 200)
@@ -183,24 +213,6 @@ class ServerTest(unittest.TestCase):
                     self.assertEqual(repaired.headers["x-cache"], "MISS")
                     self.assertEqual(repaired.json(), first.json())
 
-                calls, writes = agent.predict.call_count, cache.set.call_count
-                cache.get.side_effect = RedisError("offline")
-                with self.assertLogs(level="WARNING"):
-                    fallback = client.post("/v1/decisions", json=body)
-                self.assertEqual(fallback.status_code, 200)
-                self.assertEqual(fallback.headers["x-cache"], "BYPASS")
-                self.assertEqual(fallback.json(), first.json())
-                self.assertEqual(agent.predict.call_count, calls + 1)
-                self.assertEqual(cache.set.call_count, writes)
-
-                cache.get.side_effect = store.get
-                cache.set.side_effect = RedisError("offline")
-                with self.assertLogs(level="WARNING"):
-                    fallback = client.post("/v1/decisions", json={**body, "state": "Write failure"})
-                self.assertEqual(fallback.status_code, 200)
-                self.assertEqual(fallback.headers["x-cache"], "BYPASS")
-                self.assertEqual(fallback.json(), first.json())
-
                 writes = cache.set.call_count
                 agent.predict.side_effect = ValueError("invalid question")
                 self.assertEqual(client.post("/v1/decisions", json={**body, "state": "Model failure"}).status_code, 422)
@@ -209,8 +221,29 @@ class ServerTest(unittest.TestCase):
                     self.assertEqual(client.post("/v1/decisions", json={**body, "state": "Model failure"}).status_code, 500)
                 self.assertEqual(cache.set.call_count, writes)
                 agent.predict.side_effect = None
+
+                cache.set.side_effect = RedisError("offline")
+                with self.assertLogs(level="ERROR"):
+                    failed = client.post("/v1/decisions", json={**body, "state": "Write failure"})
+                self.assertEqual(failed.status_code, 503)
+                self.assertEqual(failed.json(), {"detail": "Redis unavailable; server is shutting down"})
+                stop.assert_called_once_with(os.getpid(), signal.SIGTERM)
+                calls, reads = agent.predict.call_count, cache.get.call_count
+                self.assertEqual(client.post("/v1/decisions", json=body).status_code, 503)
+                self.assertEqual(agent.predict.call_count, calls)
+                self.assertEqual(cache.get.call_count, reads)
+                self.assertEqual(stop.call_count, 1)
             cache.close.assert_called_once()
             self.assertEqual(connect.call_args.args, ("redis://localhost:6379/0",))
+
+            cache.get.side_effect = RedisError("offline")
+            with TestClient(app, headers={"Authorization": "Bearer demo"}) as client:
+                calls, writes = agent.predict.call_count, cache.set.call_count
+                with self.assertLogs(level="ERROR"):
+                    self.assertEqual(client.post("/v1/decisions", json=body).status_code, 503)
+                self.assertEqual(agent.predict.call_count, calls)
+                self.assertEqual(cache.set.call_count, writes)
+                self.assertEqual(stop.call_count, 2)
             # A cached answer must not enable a model disabled on the next startup.
             with patch.dict(os.environ, {"MODEL": "oscar-1"}):
                 with TestClient(app, headers={"Authorization": "Bearer demo"}) as client:

@@ -77,9 +77,14 @@ resolved model, checkpoint source, state, and validated questions. Formatting an
 model aliases normalize to the same key; criteria order is preserved because it
 can affect predictions. Authentication and model availability are checked first.
 
-Successful responses include `X-Cache: HIT`, `MISS`, or `BYPASS`. Redis read/write
-failures fall back to normal inference with short timeouts and no automatic retries.
-Errors are never cached. Cached responses, including their original usage, are unchanged.
+When `REDIS_URL` is set, Redis is required: startup checks the connection before
+loading models and aborts if it fails. The server checks Redis every five seconds
+while running, on `/health`, and during cache operations. Any Redis error triggers
+graceful server shutdown instead of falling back to inference; affected API requests
+return HTTP 503. Connections use short timeouts and no automatic retries.
+
+Successful responses include `X-Cache: HIT`, `MISS`, or `BYPASS`. Errors are never
+cached. Cached responses, including their original usage, are unchanged.
 Keep Redis private or authenticated. If weights or inference behavior change at the
 same checkpoint source, clear this cache's keys or bump the `v1` prefix in `server.py`.
 

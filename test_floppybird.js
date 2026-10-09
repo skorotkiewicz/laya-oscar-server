@@ -10,7 +10,7 @@ function page(fetch) {
   const elements = Object.fromEntries(["game", "model", "key", "start", "score", "action", "below", "falling", "latency", "status"]
     .map(id => [id, { value: "", textContent: "", disabled: false, addEventListener() {} }]));
   elements.model.value = "laya";
-  elements.model.options = [{ value: "laya" }, { value: "oscar-1" }];
+  elements.model.options = [...html.matchAll(/<option value="([^"]+)">/g)].map(match => ({ value: match[1] }));
   elements.game.getContext = () => new Proxy({}, { get: () => () => {} });
   const context = vm.createContext({ document: { getElementById: id => elements[id] }, fetch,
     AbortController, AbortSignal, performance, requestAnimationFrame: callback => setImmediate(() => callback(0)) });
@@ -99,6 +99,16 @@ async function check() {
   assert.equal(game.elements.falling.textContent, "80.0%");
   assert.equal(game.elements.start.textContent, "Start flight");
   assert.equal(game.elements.key.disabled, false);
+
+  const hobson = page(async (url, options) => {
+    if (url === "/v1/decisions") assert.equal(JSON.parse(options.body).model, "hobson-v21");
+    return { ok: true, json: async () => url === "/health" ? { models: ["hobson-v21"] }
+      : { answers: { below: { noul: .2 }, falling: { noul: .8 } } } };
+  });
+  await hobson.run("startGame()");
+  assert.equal(hobson.elements.model.value, "hobson-v21");
+  assert.equal(hobson.elements.model.options.find(option => option.value === "hobson-v21").disabled, false);
+  assert.match(hobson.elements.status.textContent, /^Flight over\./);
 
   const unauthorized = page(async () => ({ ok: false, status: 401,
     json: async () => ({ detail: "invalid or missing access token" }) }));

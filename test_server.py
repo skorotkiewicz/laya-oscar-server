@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from redis import RedisError
 
 from check_cases import assess
-from server import CHECKPOINTS, app, watch_redis
+from server import CHECKPOINTS, app, load_agent, watch_redis
 
 
 class ServerTest(unittest.TestCase):
@@ -56,7 +56,7 @@ class ServerTest(unittest.TestCase):
         load = Mock(side_effect=lambda checkpoint, **kwargs: agents[next(
             name for name, source in CHECKPOINTS.items() if source == checkpoint
         )])
-        with patch.dict(os.environ, {"API_KEY": "", "MODEL": "", "REDIS_URL": ""}), patch.dict(sys.modules, {"laya": SimpleNamespace(load=load)}):
+        with patch.dict(os.environ, {"API_KEY": "", "MODEL": "", "REDIS_URL": ""}), patch("server.load_agent", load):
             with TestClient(app) as client:
                 self.assertEqual(load.call_count, len(CHECKPOINTS))
                 self.assertEqual([call.args for call in load.call_args_list], [(source,) for source in CHECKPOINTS.values()])
@@ -107,13 +107,74 @@ class ServerTest(unittest.TestCase):
                 self.assertEqual(response.json(), {"detail": "inference failed"})
         self.assertFalse(hasattr(app.state, "agents"))
 
+    def test_hobson_backend(self):
+        from strands_decider.schema import SystemOneResponse
+
+        result = {
+            "model": "strands-decider-0.1.0",
+            "answers": {
+                "intent": {"type": "choice", "choice": "refund", "confidence": 0.8,
+                           "probabilities": {"refund": 0.9, "cancel": 0.1}},
+                "urgency": {"type": "score", "score": 0.2, "confidence": 0.2,
+                            "legend": {"0": "routine", "1": "critical"},
+                            "probabilities": {"0": 0.8, "1": 0.2}},
+                "sensitive": {"type": "noul", "noul": 0.1},
+            },
+            "usage": {"input_tokens": 42, "output_tokens": 3},
+        }
+        questions = {
+            "intent": {"type": "choice", "instructions": "What does the customer want?",
+                       "criteria": ["refund", "cancel"]},
+            "urgency": {"type": "score", "instructions": "Rate urgency.",
+                        "criteria": ["routine", "critical"]},
+            "sensitive": {"type": "noul", "instructions": "Is this a security issue?"},
+        }
+        engine = Mock()
+        engine.evaluate.return_value = SystemOneResponse.model_validate(result)
+        load = Mock(return_value=engine)
+        torch = Mock()
+        with patch.dict(os.environ, {"MODEL": "hobson-v21", "LAYA_DEVICE": "cpu", "API_KEY": "demo"}, clear=True), \
+             patch.dict(sys.modules, {"torch": torch, "strands_decider.infer": SimpleNamespace(load_engine=load)}):
+            with TestClient(app) as client:
+                load.assert_called_once_with(CHECKPOINTS["hobson-v21"], device="cpu")
+                body = {"model": "hobson-v21", "state": {"text": "I need a refund."}, "questions": questions}
+                self.assertEqual(client.post("/v1/decisions", json=body).status_code, 401)
+                engine.evaluate.assert_not_called()
+                headers = {"Authorization": "Bearer demo"}
+                self.assertEqual(client.get("/health", headers=headers).json()["models"], ["hobson-v21"])
+                for model in ("hobson-v21", CHECKPOINTS["hobson-v21"]):
+                    response = client.post("/v1/decisions", json={**body, "model": model}, headers=headers)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json(), {**result, "model": "hobson-v21"})
+                    request = engine.evaluate.call_args.args[0]
+                    self.assertEqual(request.state, body["state"])
+                    self.assertEqual(request.questions["intent"].criteria, {"refund": "refund", "cancel": "cancel"})
+                    self.assertEqual(request.questions["urgency"].criteria, ["routine", "critical"])
+                    self.assertEqual(request.questions["sensitive"].type, "noul")
+                mapped = {**questions, "intent": {**questions["intent"], "criteria": {"r": "Refund", "c": "Cancel"}}}
+                self.assertEqual(client.post("/v1/decisions", json={**body, "questions": mapped}, headers=headers).status_code, 200)
+                self.assertEqual(engine.evaluate.call_args.args[0].questions["intent"].criteria, {"r": "Refund", "c": "Cancel"})
+                calls = engine.evaluate.call_count
+                too_many_levels = {"x": {"type": "score", "instructions": "Rate", "criteria": [str(i) for i in range(11)]}}
+                self.assertEqual(client.post("/v1/decisions", json={**body, "questions": too_many_levels}, headers=headers).status_code, 422)
+                self.assertEqual(engine.evaluate.call_count, calls)
+            for cuda, mps, device in ((True, True, "cuda"), (False, True, "mps"), (False, False, "cpu")):
+                torch.cuda.is_available.return_value = cuda
+                torch.backends.mps.is_available.return_value = mps
+                load_agent(CHECKPOINTS["hobson-v21"])
+                load.assert_called_with(CHECKPOINTS["hobson-v21"], device=device)
+        laya_load = Mock()
+        with patch.dict(sys.modules, {"laya": SimpleNamespace(load=laya_load)}):
+            self.assertIs(load_agent(CHECKPOINTS["laya"], device="cpu"), laya_load.return_value)
+            laya_load.assert_called_once_with(CHECKPOINTS["laya"], device="cpu")
+
     def test_model_selection(self):
         body = {"model": "oscar-1", "state": "hello", "questions": {"x": {"type": "noul", "instructions": "Is this a greeting?"}}}
         for selection in (None, "", *CHECKPOINTS, "unknown"):
             agent = Mock()
             agent.predict.return_value = {"answers": {"x": {"type": "noul", "noul": 0.9}}}
             load = Mock(return_value=agent)
-            with patch.dict(os.environ, {}, clear=True), patch.dict(sys.modules, {"laya": SimpleNamespace(load=load)}):
+            with patch.dict(os.environ, {}, clear=True), patch("server.load_agent", load):
                 if selection is not None:
                     os.environ["MODEL"] = selection
                 if selection == "unknown":
@@ -144,7 +205,7 @@ class ServerTest(unittest.TestCase):
         cache, load = Mock(), Mock()
         cache.ping.side_effect = RedisError("offline")
         with patch.dict(os.environ, {"REDIS_URL": "redis://localhost:6379/0"}, clear=True), \
-             patch.dict(sys.modules, {"laya": SimpleNamespace(load=load)}), \
+             patch("server.load_agent", load), \
              patch("server.Redis.from_url", return_value=cache):
             with self.assertRaisesRegex(RuntimeError, "Redis unavailable; server startup aborted"):
                 with TestClient(app):
@@ -177,7 +238,7 @@ class ServerTest(unittest.TestCase):
         cache.get.side_effect = store.get
         cache.set.side_effect = lambda key, value, **kwargs: store.__setitem__(key, value)
         with patch.dict(os.environ, {"REDIS_URL": "redis://localhost:6379/0", "API_KEY": "demo"}, clear=True), \
-             patch.dict(sys.modules, {"laya": SimpleNamespace(load=Mock(return_value=agent))}), \
+             patch("server.load_agent", return_value=agent), \
              patch("server.Redis.from_url", return_value=cache) as connect, \
              patch("server.os.kill") as stop:
             with TestClient(app, headers={"Authorization": "Bearer demo"}) as client:
@@ -256,7 +317,7 @@ class ServerTest(unittest.TestCase):
         for key in (None, "", "demo"):
             agent = Mock()
             agent.predict.return_value = {"answers": {"x": {"type": "noul", "noul": 0.9}}}
-            with patch.dict(os.environ, {}, clear=True), patch.dict(sys.modules, {"laya": SimpleNamespace(load=Mock(return_value=agent))}):
+            with patch.dict(os.environ, {}, clear=True), patch("server.load_agent", return_value=agent):
                 if key is not None:
                     os.environ["API_KEY"] = key
                 with TestClient(app) as client:

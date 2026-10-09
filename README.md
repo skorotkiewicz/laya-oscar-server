@@ -1,11 +1,12 @@
-# Laya and Oscar HTTP API
+# Laya, Oscar, and Hobson HTTP API
 
-Run `mgoeckel/oscar-1-400m` and `convaiinnovations/laya` through
-`POST /v1/decisions`. The server loads both models once at startup unless you
-select one with `MODEL`.
+Run `mgoeckel/oscar-1-400m`, `convaiinnovations/laya`, and
+`StrandsAgents/strands-decider-2B-hobson-v21` through `POST /v1/decisions`.
+The server loads all three models once at startup unless you select one with `MODEL`.
 
-The first run downloads the enabled checkpoints from Hugging Face. You'll need
-internet access and enough memory to load them.
+The first run downloads the enabled checkpoints from Hugging Face. Hobson also
+downloads its base model, `Qwen/Qwen3.5-2B-Base`. You'll need internet access and
+enough memory to load the selected models.
 
 ## Run
 
@@ -27,6 +28,10 @@ python -m pip install -r requirements.txt
 python server.py
 ```
 
+Hobson uses `strands-decider` and requires PyTorch 2.7 or newer and Transformers
+5.15 or newer. Installing the requirements may upgrade an older PyTorch build.
+Check that the installed build supports your GPU.
+
 The default address is `http://127.0.0.1:8001`. To change it:
 
 ```sh
@@ -40,8 +45,9 @@ or check the server with:
 curl http://127.0.0.1:8001/health
 ```
 
-Set `LAYA_DEVICE=cpu` or `LAYA_DEVICE=cuda` to choose a device. Otherwise, Laya
-chooses it.
+Set `LAYA_DEVICE=cpu` or `LAYA_DEVICE=cuda` to choose a device for every model.
+Otherwise, Laya chooses the device for Oscar and Laya. Hobson uses CUDA if
+available, then MPS, then CPU.
 
 ## Choose a model
 
@@ -49,9 +55,11 @@ chooses it.
 MODEL=laya python server.py
 # Load only Oscar instead:
 MODEL=oscar-1 python server.py
+# Load only Hobson instead:
+MODEL=hobson-v21 python server.py
 ```
 
-Unset or empty `MODEL` loads both models. An unsupported value stops startup
+Unset or empty `MODEL` loads all three models. An unsupported value stops startup
 before any checkpoint loads. `/health` lists the loaded models, and requests
 for a disabled model return HTTP 422.
 
@@ -86,14 +94,18 @@ curl http://127.0.0.1:8001/v1/decisions \
   }'
 ```
 
-Use `"model": "laya"` for Laya. The full checkpoint IDs also work. Omitting
-`model` returns HTTP 422.
+Use `"model": "laya"` for Laya or `"model": "hobson-v21"` for Hobson. The full
+checkpoint IDs also work, including
+`"model": "StrandsAgents/strands-decider-2B-hobson-v21"`. Omitting `model` returns
+HTTP 422.
 
 `state` can be a string or a JSON object. For `choice`, supply criteria as a list
-or an object mapping labels to descriptions. For `score`, supply a list.
+or an object mapping labels to descriptions. For `score`, supply a list. Hobson
+accepts 2 to 10 score levels; longer rubrics return HTTP 422.
 
-The server returns Laya's answers and usage unchanged, with `model` set to
-`"oscar-1"` or `"laya"`. It adds no billing or provider metadata.
+The server returns the selected backend's answers and usage unchanged, with
+`model` set to `"oscar-1"`, `"laya"`, or `"hobson-v21"`. It adds no billing or
+provider metadata.
 
 ## Require an API key
 
@@ -185,8 +197,9 @@ pip install httpx
 python -m unittest test_server.py
 ```
 
-These tests stub Laya and exercise the real HTTP routes, validation, and error
-handling. They do not test real-model inference.
+These tests stub model loading and inference, and exercise the real HTTP routes,
+validation, and error handling. They also check Hobson's request and response
+schemas. They do not test real-model inference.
 
 With Node.js installed, check game physics, request payloads, cancellation, and
 error handling without a browser or model:
@@ -207,7 +220,7 @@ learned flight policy.
 
 ## Evaluate real models
 
-With the server running, compare both models against `cases.jsonl`:
+With the server running, compare all three models against `cases.jsonl`:
 
 ```sh
 python check_cases.py --url http://127.0.0.1:8001
@@ -215,8 +228,9 @@ python check_cases.py --url http://127.0.0.1:8001
 API_KEY="demo" python check_cases.py --url http://127.0.0.1:8001
 ```
 
-Use `--models laya` or `--models oscar-1` to check one model, and `--cases PATH`
-to use another JSONL file. The default URL is `http://127.0.0.1:8001`.
+Use `--models laya`, `--models oscar-1`, or `--models hobson-v21` to check one
+model, and `--cases PATH` to use another JSONL file. The default URL is
+`http://127.0.0.1:8001`.
 
 Each row reports the expected answer, raw prediction, and probability assigned to
 the expected answer. A `choice` answer passes on an exact label match. A `noul`

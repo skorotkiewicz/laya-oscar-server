@@ -1,4 +1,5 @@
 laya==0.3.28
+strands-decider==0.1.0
 fastapi>=0.135.0,<1
 uvicorn>=0.27.0,<1
 redis>=5.0.0

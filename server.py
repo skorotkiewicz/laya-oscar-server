@@ -1,4 +1,4 @@
-"""HTTP API for Oscar and Laya checkpoints."""
+"""HTTP API for Oscar, Laya, and Hobson checkpoints."""
 
 import asyncio
 import hashlib
@@ -27,6 +27,7 @@ CHECKPOINTS = {
     # "oscar-1-150m": "mgoeckel/oscar-1-150m",
     "oscar-1": "mgoeckel/oscar-1-400m",
     "laya": "convaiinnovations/laya",
+    "hobson-v21": "StrandsAgents/strands-decider-2B-hobson-v21",
     # "laya-multilingual": "convaiinnovations/laya-multilingual",
     # "laya-typed-decisions": "convaiinnovations/laya-typed-decisions",
 }
@@ -61,6 +62,7 @@ class DecisionRequest(BaseModel):
     model: Literal[
         "oscar-1", "mgoeckel/oscar-1-400m",
         "laya", "convaiinnovations/laya",
+        "hobson-v21", "StrandsAgents/strands-decider-2B-hobson-v21",
         # "oscar-1-small", "mgoeckel/oscar-1-17m",
         # "laya-multilingual", "convaiinnovations/laya-multilingual",
         # "laya-typed-decisions", "convaiinnovations/laya-typed-decisions"
@@ -73,6 +75,38 @@ class DecisionRequest(BaseModel):
         if isinstance(self.state, dict) and len(json.dumps(self.state, ensure_ascii=False)) > 50000:
             raise ValueError("state must not exceed 50000 characters")
         return self
+
+
+class HobsonAgent:
+    def __init__(self, checkpoint, device=None):
+        import torch
+        from strands_decider.infer import load_engine
+
+        if not device:
+            device = "cuda" if torch.cuda.is_available() else (
+                "mps" if torch.backends.mps.is_available() else "cpu"
+            )
+        self.engine = load_engine(checkpoint, device=device)
+
+    def predict(self, state, questions):
+        from strands_decider.schema import SystemOneRequest
+
+        questions = {
+            name: {**question, "criteria": {label: label for label in question["criteria"]}}
+            if question["type"] == "choice" and isinstance(question["criteria"], list)
+            else question
+            for name, question in questions.items()
+        }
+        request = SystemOneRequest(state=state, questions=questions)
+        return self.engine.evaluate(request).model_dump()
+
+
+def load_agent(checkpoint, device=None):
+    if checkpoint == CHECKPOINTS["hobson-v21"]:
+        return HobsonAgent(checkpoint, device=device)
+    import laya
+
+    return laya.load(checkpoint, device=device)
 
 
 def redis_unavailable():
@@ -113,10 +147,8 @@ async def lifespan(app: FastAPI):
                 app.state.cache.ping()
             except RedisError as error:
                 raise RuntimeError("Redis unavailable; server startup aborted") from error
-        import laya
-
         app.state.agents = {
-            name: laya.load(checkpoint, device=os.getenv("LAYA_DEVICE") or None)
+            name: load_agent(checkpoint, device=os.getenv("LAYA_DEVICE") or None)
             for name, checkpoint in CHECKPOINTS.items()
             if selected is None or name == selected
         }
@@ -149,7 +181,7 @@ def require_api_key(
         )
 
 
-app = FastAPI(title="Laya and Oscar API", lifespan=lifespan)
+app = FastAPI(title="Laya, Oscar, and Hobson API", lifespan=lifespan)
 
 
 @app.get("/floppybird.html", include_in_schema=False)

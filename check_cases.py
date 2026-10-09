@@ -24,7 +24,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8001")
     parser.add_argument("--cases", type=Path, default=Path(__file__).with_name("cases.jsonl"))
-    parser.add_argument("--models", nargs="+", choices=["oscar-1", "laya"], default=["oscar-1", "laya"])
+    parser.add_argument("--models", nargs="+", choices=["oscar-1", "laya", "hobson-v21"],
+                        default=["oscar-1", "laya", "hobson-v21"])
     args = parser.parse_args()
     with args.cases.open(encoding="utf-8") as file:
         cases = [(line_number, json.loads(line)) for line_number, line in enumerate(file, 1) if line.strip()]
